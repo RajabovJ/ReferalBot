@@ -1,9 +1,11 @@
 <?php
 namespace App\Services\Telegram\Text;
 
+use App\Jobs\SendTelegramPost;
 use App\Models\Text as ModelsText;
 use App\Models\User;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Telegram\Bot\Laravel\Facades\Telegram;
 use Telegram\Bot\Objects\Update;
 
@@ -14,32 +16,28 @@ class AdminTextMessageHandler
         $botUsername = env('TELEGRAM_BOT_USERNAME', 'YourBotUsername');
         $text = $update->getMessage()->getText();
         $chatId = $user->telegram_id;
+        $message = $update->getMessage();
+
         if ($user->step === 'post_yuborish') {
-            // step ni bekor qilamiz
+            // Stepni tozalaymiz
             $user->step = null;
             $user->save();
+
+            // Eski postni o‘chirish (agar mavjud bo‘lsa)
             $msgId = Cache::get("post_message_id_$chatId");
-            Telegram::deleteMessage([
-                'chat_id' => $chatId,
-                'message_id' => $msgId,
-            ]);
-            Cache::forget("post_message_id_$chatId");
-            $update = Telegram::getWebhookUpdate();
-            $message = $update->getMessage();
-
-            $users = User::whereNotNull('telegram_id')->pluck('telegram_id');
-
-            foreach ($users as $toChatId) {
+            if ($msgId) {
                 try {
-                    Telegram::copyMessage([
-                        'chat_id' => $toChatId,
-                        'from_chat_id' => $chatId,
-                        'message_id' => $message->getMessageId(),
+                    Telegram::deleteMessage([
+                        'chat_id' => $chatId,
+                        'message_id' => $msgId,
                     ]);
                 } catch (\Exception $e) {
-                    // xatolarni logga yozish yoki tashlab ketish
+                    Log::warning("❗ Eski xabarni o‘chirishda xatolik: " . $e->getMessage());
                 }
+                Cache::forget("post_message_id_$chatId");
             }
+
+            // Klaviatura
             $keyboard = [
                 ['💎 Do‘stlarni taklif qilish'],
                 ['📣 Mening do‘stlarim', '📊 Natijalar'],
@@ -47,20 +45,85 @@ class AdminTextMessageHandler
             ];
 
             if ($user->is_admin) {
-                $keyboard[] = ['📬 Post yaratish']; // adminlar uchun qo‘shimcha tugma
+                $keyboard[] = ['📬 Post yaratish'];
             }
-            Telegram::sendMessage([
+
+            // "Post jo'natilyapti..." degan status xabarini yuborish
+            $sending = Telegram::sendMessage([
                 'chat_id' => $chatId,
-                'text' => "✅ Post muvaffaqiyatli yuborildi!",
+                'text' => "⏳ Post jo'natilyapti...",
                 'reply_markup' => json_encode([
-                                    'keyboard' => $keyboard,
-                                    'resize_keyboard' => true,
-                                    'one_time_keyboard' => false,
-                                ]),
+                    'keyboard' => $keyboard,
+                    'resize_keyboard' => true,
+                    'one_time_keyboard' => false,
+                ], JSON_UNESCAPED_UNICODE),
             ]);
+
+            $statusMsgId = $sending->getMessageId();
+
+            // Job'ga jo‘natamiz
+            \App\Jobs\SendTelegramPost::dispatch(
+                $chatId,                   // fromChatId
+                $message->getMessageId(),  // messageId
+                $chatId,                   // adminChatId
+                $statusMsgId              // adminMsgId (buni o‘chiramiz keyin)
+            )->onQueue('default');
 
             return;
         }
+
+
+
+
+        // if ($user->step === 'post_yuborish') {
+        //     // step ni bekor qilamiz
+        //     $user->step = null;
+        //     $user->save();
+        //     $msgId = Cache::get("post_message_id_$chatId");
+        //     Telegram::deleteMessage([
+        //         'chat_id' => $chatId,
+        //         'message_id' => $msgId,
+        //     ]);
+        //     Cache::forget("post_message_id_$chatId");
+        //     $update = Telegram::getWebhookUpdate();
+        //     $message = $update->getMessage();
+        //     // Jobga yuboramiz
+        //     SendTelegramPost::dispatch($chatId, $message->getMessageId());
+        //     // $users = User::whereNotNull('telegram_id')->pluck('telegram_id');
+        //     // $activeCount = 0;
+        //     // foreach ($users as $toChatId) {
+        //     //     try {
+        //     // Telegram::copyMessage([
+        //     //             'chat_id' => $toChatId,
+        //     //             'from_chat_id' => $chatId,
+        //     //             'message_id' => $message->getMessageId(),
+        //     //         ]);
+        //     //         $activeCount++;
+        //     //     } catch (\Exception $e) {
+        //     //         // xatolarni logga yozish yoki tashlab ketish
+        //     //     }
+        //     // }
+        //     $keyboard = [
+        //         ['💎 Do‘stlarni taklif qilish'],
+        //         ['📣 Mening do‘stlarim', '📊 Natijalar'],
+        //         ['🎁 Sovg‘alar', '📝 Tanlov shartlari'],
+        //     ];
+
+        //     if ($user->is_admin) {
+        //         $keyboard[] = ['📬 Post yaratish']; // adminlar uchun qo‘shimcha tugma
+        //     }
+        //     Telegram::sendMessage([
+        //         'chat_id' => $chatId,
+        //         'text' => "Post jo'natilyapti.....",
+        //         'reply_markup' => json_encode([
+        //                             'keyboard' => $keyboard,
+        //                             'resize_keyboard' => true,
+        //                             'one_time_keyboard' => false,
+        //                         ]),
+        //     ]);
+
+        //     return;
+        // }
 
         switch ($text) {
             case '💎 Do‘stlarni taklif qilish':
